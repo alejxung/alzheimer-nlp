@@ -1,17 +1,19 @@
 import pandas as pd
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from peft import get_peft_model, LoraConfig, TaskType
+from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix
 import wandb
 
 #=== Config =============================================#
 MODEL_NAME = "emilyalsentzer/Bio_ClinicalBERT"
 DATA_PATH = "clinicalbert/data/sample.csv"
 MAX_LEN = 128
-BATCH_SIZE = 2
-EPOCHS = 3
+BATCH_SIZE = 4
+EPOCHS = 10
 LR = 2e-4
+VAL_SPLIT = 0.2
 
 #=== Dataset ============================================#
 class ClinicalDataset(Dataset):
@@ -52,27 +54,64 @@ lora_config = LoraConfig(
 model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
 
-#=== Data ===============================================#
-dataset = ClinicalDataset(DATA_PATH, tokenizer, MAX_LEN)
-dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+#=== Train/Val Split ====================================#
+full_dataset = ClinicalDataset(DATA_PATH, tokenizer, MAX_LEN)
+val_size = int(len(full_dataset) * VAL_SPLIT)
+train_size = len(full_dataset) - val_size
+
+train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+val_loader = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False)
+
+print(f"Train: {train_size} samples | Val: {val_size} samples")
 
 #=== W&B ================================================#
 wandb.init(
-    entity="alzheimer-nlp",
     project="alzheimer-nlp",
-    name="clinicalbert-lora-run1",
-    config={"model": MODEL_NAME, "epochs": EPOCHS, "lr": LR, "lora_r": 8}
+    name="clinicalbert-lora-run2",
+    config={
+        "model": MODEL_NAME,
+        "epochs": EPOCHS,
+        "lr": LR,
+        "lora_r": 8,
+        "batch_size": BATCH_SIZE,
+        "val_split": VAL_SPLIT
+    }
 )
 
-#=== Training Loop ======================================#
+#=== Eval function ======================================#
+def evaluate(model, loader):
+    model.eval()
+    all_preds = []
+    all_labels = []
+
+    with torch.no_grad():
+        for batch in loader:
+            outputs = model(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"]
+            )
+            preds = outputs.logits.argmax(dim=-1)
+            all_preds.extend(preds.tolist())
+            all_labels.extend(batch["labels"].tolist())
+
+    f1 = f1_score(all_labels, all_preds, zero_division=0)
+    precision = precision_score(all_labels, all_preds, zero_division=0)
+    recall = recall_score(all_labels, all_preds, zero_division=0)
+    cm = confusion_matrix(all_labels, all_preds)
+
+    return {"f1": f1, "precision": precision, "recall": recall, "confusion_matrix": cm}
+
+#=== Training loop ======================================#
 optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
-model.train()
 
 for epoch in range(EPOCHS):
+    model.train()
     total_loss = 0
     correct = 0
 
-    for batch in dataloader:
+    for batch in train_loader:
         optimizer.zero_grad()
         outputs = model(
             input_ids=batch["input_ids"],
@@ -87,11 +126,28 @@ for epoch in range(EPOCHS):
         preds = outputs.logits.argmax(dim=-1)
         correct += (preds == batch["labels"]).sum().item()
 
-    avg_loss = total_loss / len(dataloader)
-    accuracy = correct / len(dataset)
+    train_loss = total_loss / len(train_loader)
+    train_acc = correct / train_size
 
-    print(f"Epoch {epoch+1} | Loss: {avg_loss:.4f} | Acc: {accuracy:.4f}")
-    wandb.log({"epoch": epoch+1, "loss": avg_loss, "accuracy": accuracy})
+    val_metrics = evaluate(model, val_loader)
+
+    print(
+        f"Epoch {epoch+1:02d} | "
+        f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
+        f"Val F1: {val_metrics['f1']:.4f} | "
+        f"Val Precision: {val_metrics['precision']:.4f} | "
+        f"Val Recall: {val_metrics['recall']:.4f}"
+    )
+    print(f"Confusion Matrix:\n{val_metrics['confusion_matrix']}\n")
+
+    wandb.log({
+        "epoch": epoch + 1,
+        "train_loss": train_loss,
+        "train_acc": train_acc,
+        "val_f1": val_metrics["f1"],
+        "val_precision": val_metrics["precision"],
+        "val_recall": val_metrics["recall"]
+    })
 
 wandb.finish()
 print("Done.")
