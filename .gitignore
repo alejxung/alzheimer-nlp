@@ -2,10 +2,13 @@ venv/
 __pycache__/
 *.pyc
 .env
-data/
+clinicalbert/data/mimic_raw/
+clinicalbert/data/*.csv
+clinicalbert/data/adress/
 *.csv
 *.zip
 checkpoints/
+checkpoints_masked/
 wandb/
 *.pt
 *.bin
