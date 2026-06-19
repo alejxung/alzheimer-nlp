@@ -109,6 +109,39 @@ modes is as important as reporting its headline metrics.
 **Future work:** expand training data to include shorter-form clinical assessments
 (e.g. cognitive screening notes) to improve robustness across note lengths and styles.
 
+## Ablation: reliance on explicit diagnosis keywords
+
+85.7% of dementia-labeled notes contain the literal word "dementia" or "alzheimer"
+somewhere in the text (often in a discharge diagnosis line). This raised a question:
+is the model learning to detect cognitive decline from symptom language, or is it
+mostly pattern-matching the diagnostic keyword itself? These are different tasks of
+very different difficulty, and only the first is a meaningful step toward early
+detection.
+
+To test this, the keyword was masked (`dementia` / `alzheimer*` replaced with
+`[MASKED]`) in all notes, and the model was retrained from scratch on the masked
+dataset, with identical hyperparameters and the same train/val split.
+
+| Version | Val F1 | Precision | Recall |
+|---|---|---|---|
+| Original (keyword present) | 0.87 | 0.85 | 0.89 |
+| Keyword masked | 0.80 | 0.76 | 0.84 |
+
+F1 dropped by roughly 7 points after masking, not a collapse to chance level (0.50).
+This indicates the model relies on the explicit keyword to some degree, but is also
+learning real symptom-language signal independent of it. Supporting this: 21 of 293
+control notes also contained "dementia" or "alzheimer" (e.g. ruled-out differential
+diagnoses, family history mentions), so the keyword was never a perfect shortcut to
+the label in the first place.
+
+**Takeaway:** the reported 0.87 F1 reflects a task that includes some diagnostic-label
+leakage. The 0.80 F1 under masking is a more honest estimate of the model's ability
+to detect dementia-related language without relying on an explicit diagnosis being
+stated, closer to what an early-detection system would need.
+
+Full run logged on [Weights & Biases](https://wandb.ai/alzheimer-nlp/alzheimer-nlp)
+under the run name `clinicalbert-lora-masked-ablation`.
+
 ## Project structure
 
 ```
