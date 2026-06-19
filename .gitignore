@@ -5,6 +5,7 @@ __pycache__/
 clinicalbert/data/mimic_raw/
 clinicalbert/data/*.csv
 clinicalbert/data/adress/
+clinicalbert/data/splits/
 *.csv
 *.zip
 checkpoints/

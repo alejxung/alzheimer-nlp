@@ -1,19 +1,31 @@
+import argparse
 import pandas as pd
 import torch
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from peft import PeftModel, PeftConfig
 from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix, classification_report
 
+#=== CLI ================================================#
+parser = argparse.ArgumentParser(description="Evaluate the trained ClinicalBERT checkpoint.")
+parser.add_argument(
+    "--split",
+    choices=["val", "test"],
+    default="test",
+    help="Which held-out split to evaluate on. "
+         "'val' was used during training for model selection (expect optimistic numbers). "
+         "'test' was never touched during training (the honest, reportable number)."
+)
+args = parser.parse_args()
+
 #=== Config =============================================#
-DATA_PATH = "clinicalbert/data/mimic_dementia.csv"
+SPLIT_DIR = "clinicalbert/data/splits"
 MAX_LEN = 512
 BATCH_SIZE = 4
-VAL_SPLIT = 0.2
-SEED = 42
 CHECKPOINT_DIR = "clinicalbert/checkpoints/best_model"
+DATA_PATH = f"{SPLIT_DIR}/{args.split}.csv"
 
-#=== Device ===============================================#
+#=== Device =============================================#
 def get_device():
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -50,7 +62,7 @@ class ClinicalDataset(Dataset):
             "labels": torch.tensor(row["label"], dtype=torch.long)
         }
 
-#=== Load saved model + tokenizer =========================#
+#=== Load saved model + tokenizer =======================#
 print(f"Loading checkpoint from {CHECKPOINT_DIR}...")
 
 peft_config = PeftConfig.from_pretrained(CHECKPOINT_DIR)
@@ -63,23 +75,22 @@ tokenizer = AutoTokenizer.from_pretrained(CHECKPOINT_DIR)
 model = model.to(device)
 model.eval()
 
-#=== Reconstruct identical val split ======================#
-full_dataset = ClinicalDataset(DATA_PATH, tokenizer, MAX_LEN)
-val_size = int(len(full_dataset) * VAL_SPLIT)
-train_size = len(full_dataset) - val_size
+#=== Load chosen split ==================================#
+dataset = ClinicalDataset(DATA_PATH, tokenizer, MAX_LEN)
+loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-generator = torch.Generator().manual_seed(SEED)
-_, val_dataset = random_split(full_dataset, [train_size, val_size], generator=generator)
+print(f"Evaluating on {len(dataset)} samples from '{args.split}' split ({DATA_PATH})")
+if args.split == "test":
+    print("(held out from all training and model-selection decisions)\n")
+else:
+    print("(used during training for checkpoint selection, expect optimistic numbers)\n")
 
-val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
-print(f"Evaluating on {val_size} validation samples\n")
-
-#=== Run inference =========================================#
+#=== Run inference ======================================#
 all_preds = []
 all_labels = []
 
 with torch.no_grad():
-    for batch in val_loader:
+    for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
         outputs = model(
             input_ids=batch["input_ids"],
@@ -89,15 +100,15 @@ with torch.no_grad():
         all_preds.extend(preds.cpu().tolist())
         all_labels.extend(batch["labels"].cpu().tolist())
 
-#=== Report ================================================#
+#=== Report =============================================#
 f1 = f1_score(all_labels, all_preds, zero_division=0)
 precision = precision_score(all_labels, all_preds, zero_division=0)
 recall = recall_score(all_labels, all_preds, zero_division=0)
 cm = confusion_matrix(all_labels, all_preds)
 
-print("=" * 50)
-print("FINAL EVALUATION RESULTS")
-print("=" * 50)
+print("=" * 55)
+print(f"RESULTS ({args.split.upper()} SPLIT)")
+print("=" * 55)
 print(f"F1 Score:  {f1:.4f}")
 print(f"Precision: {precision:.4f}")
 print(f"Recall:    {recall:.4f}")

@@ -1,6 +1,6 @@
 import pandas as pd
 import torch
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from peft import get_peft_model, LoraConfig, TaskType
 from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix
@@ -9,13 +9,11 @@ import os
 
 #=== Config =============================================#
 MODEL_NAME = "emilyalsentzer/Bio_ClinicalBERT"
-DATA_PATH = "clinicalbert/data/mimic_dementia.csv"
+SPLIT_DIR = "clinicalbert/data/splits"
 MAX_LEN = 512
 BATCH_SIZE = 4
 EPOCHS = 15
 LR = 2e-4
-VAL_SPLIT = 0.2
-SEED = 42
 PATIENCE = 3
 CHECKPOINT_DIR = "clinicalbert/checkpoints"
 
@@ -37,7 +35,7 @@ class ClinicalDataset(Dataset):
         self.df = pd.read_csv(csv_path)
         self.tokenizer = tokenizer
         self.max_len = max_len
-    
+
     def __len__(self):
         return len(self.df)
 
@@ -71,34 +69,36 @@ model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
 model = model.to(device)
 
-#=== Train/Val Split ====================================#
-full_dataset = ClinicalDataset(DATA_PATH, tokenizer, MAX_LEN)
-val_size = int(len(full_dataset) * VAL_SPLIT)
-train_size = len(full_dataset) - val_size
+#=== Load persisted splits ================================#
+if not os.path.exists(f"{SPLIT_DIR}/train.csv"):
+    raise FileNotFoundError(
+        f"No split files found at {SPLIT_DIR}/. "
+        f"Run `python clinicalbert/data/split_dataset.py` first."
+    )
 
-generator = torch.Generator().manual_seed(SEED)
-train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size], generator=generator)
+train_dataset = ClinicalDataset(f"{SPLIT_DIR}/train.csv", tokenizer, MAX_LEN)
+val_dataset = ClinicalDataset(f"{SPLIT_DIR}/val.csv", tokenizer, MAX_LEN)
 
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-val_loader = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False)
+val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-print(f"Train: {train_size} samples | Val: {val_size} samples")
+print(f"Train: {len(train_dataset)} samples | Val: {len(val_dataset)} samples")
+print("(Test set held out separately, not loaded during training)")
 
 #=== W&B ================================================#
 wandb.init(
     project="alzheimer-nlp",
-    name="clinicalbert-lora-run4",
+    name="clinicalbert-lora-run5-3way-split",
     config={
         "model": MODEL_NAME,
         "epochs": EPOCHS,
         "lr": LR,
         "lora_r": 8,
         "batch_size": BATCH_SIZE,
-        "val_split": VAL_SPLIT,
         "max_len": MAX_LEN,
         "device": str(device),
-        "seed": SEED,
-        "patience": PATIENCE
+        "patience": PATIENCE,
+        "split_scheme": "70/15/15 stratified, persisted to disk"
     }
 )
 
@@ -161,7 +161,7 @@ for epoch in range(EPOCHS):
         correct += (preds == batch["labels"]).sum().item()
 
     train_loss = total_loss / len(train_loader)
-    train_acc = correct / train_size
+    train_acc = correct / len(train_dataset)
 
     val_metrics = evaluate(model, val_loader)
 
@@ -205,3 +205,5 @@ for epoch in range(EPOCHS):
 
 wandb.finish()
 print(f"Done. Best val F1: {best_val_f1:.4f}")
+print("\nNOTE: this is the VALIDATION F1, used for model selection.")
+print("Run `python clinicalbert/evaluate.py --split test` ONCE for the unbiased test metric.")
