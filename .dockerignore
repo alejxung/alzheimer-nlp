@@ -1,0 +1,7 @@
+clinicalbert/data/mimic_raw/
+clinicalbert/data/*.csv
+wandb/
+venv/
+__pycache__/
+*.pyc
+.git/
