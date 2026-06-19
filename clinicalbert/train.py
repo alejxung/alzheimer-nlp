@@ -5,15 +5,31 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from peft import get_peft_model, LoraConfig, TaskType
 from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix
 import wandb
+import os
 
 #=== Config =============================================#
 MODEL_NAME = "emilyalsentzer/Bio_ClinicalBERT"
-DATA_PATH = "clinicalbert/data/sample.csv"
-MAX_LEN = 128
+DATA_PATH = "clinicalbert/data/mimic_dementia.csv"
+MAX_LEN = 512
 BATCH_SIZE = 4
-EPOCHS = 10
+EPOCHS = 15
 LR = 2e-4
 VAL_SPLIT = 0.2
+SEED = 42
+PATIENCE = 3
+CHECKPOINT_DIR = "clinicalbert/checkpoints"
+
+#=== Device ==============================================#
+def get_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        return torch.device("mps")
+    else:
+        return torch.device("cpu")
+
+device = get_device()
+print(f"Using device: {device}")
 
 #=== Dataset ============================================#
 class ClinicalDataset(Dataset):
@@ -53,13 +69,15 @@ lora_config = LoraConfig(
 )
 model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
+model = model.to(device)
 
 #=== Train/Val Split ====================================#
 full_dataset = ClinicalDataset(DATA_PATH, tokenizer, MAX_LEN)
 val_size = int(len(full_dataset) * VAL_SPLIT)
 train_size = len(full_dataset) - val_size
 
-train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+generator = torch.Generator().manual_seed(SEED)
+train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size], generator=generator)
 
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False)
@@ -69,14 +87,18 @@ print(f"Train: {train_size} samples | Val: {val_size} samples")
 #=== W&B ================================================#
 wandb.init(
     project="alzheimer-nlp",
-    name="clinicalbert-lora-run2",
+    name="clinicalbert-lora-run4",
     config={
         "model": MODEL_NAME,
         "epochs": EPOCHS,
         "lr": LR,
         "lora_r": 8,
         "batch_size": BATCH_SIZE,
-        "val_split": VAL_SPLIT
+        "val_split": VAL_SPLIT,
+        "max_len": MAX_LEN,
+        "device": str(device),
+        "seed": SEED,
+        "patience": PATIENCE
     }
 )
 
@@ -88,23 +110,34 @@ def evaluate(model, loader):
 
     with torch.no_grad():
         for batch in loader:
+            batch = {k: v.to(device) for k, v in batch.items()}
             outputs = model(
                 input_ids=batch["input_ids"],
                 attention_mask=batch["attention_mask"]
             )
             preds = outputs.logits.argmax(dim=-1)
-            all_preds.extend(preds.tolist())
-            all_labels.extend(batch["labels"].tolist())
+            all_preds.extend(preds.cpu().tolist())
+            all_labels.extend(batch["labels"].cpu().tolist())
 
     f1 = f1_score(all_labels, all_preds, zero_division=0)
     precision = precision_score(all_labels, all_preds, zero_division=0)
     recall = recall_score(all_labels, all_preds, zero_division=0)
     cm = confusion_matrix(all_labels, all_preds)
 
-    return {"f1": f1, "precision": precision, "recall": recall, "confusion_matrix": cm}
+    return {
+        "f1": f1,
+        "precision": precision,
+        "recall": recall,
+        "confusion_matrix": cm,
+        "labels": all_labels,
+        "preds": all_preds
+    }
 
-#=== Training loop ======================================#
+#=== Training loop with early stopping ==================#
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
+best_val_f1 = 0.0
+epochs_without_improvement = 0
 
 for epoch in range(EPOCHS):
     model.train()
@@ -112,6 +145,7 @@ for epoch in range(EPOCHS):
     correct = 0
 
     for batch in train_loader:
+        batch = {k: v.to(device) for k, v in batch.items()}
         optimizer.zero_grad()
         outputs = model(
             input_ids=batch["input_ids"],
@@ -146,8 +180,28 @@ for epoch in range(EPOCHS):
         "train_acc": train_acc,
         "val_f1": val_metrics["f1"],
         "val_precision": val_metrics["precision"],
-        "val_recall": val_metrics["recall"]
+        "val_recall": val_metrics["recall"],
+        "val_confusion_matrix": wandb.plot.confusion_matrix(
+            y_true=val_metrics["labels"],
+            preds=val_metrics["preds"],
+            class_names=["control", "dementia"]
+        )
     })
 
+    if val_metrics["f1"] > best_val_f1:
+        best_val_f1 = val_metrics["f1"]
+        epochs_without_improvement = 0
+        save_path = os.path.join(CHECKPOINT_DIR, "best_model")
+        model.save_pretrained(save_path)
+        tokenizer.save_pretrained(save_path)
+        print(f"  -> New best val F1: {best_val_f1:.4f}. Saved to {save_path}\n")
+    else:
+        epochs_without_improvement += 1
+        print(f"  -> No improvement for {epochs_without_improvement} epoch(s).\n")
+
+        if epochs_without_improvement >= PATIENCE:
+            print(f"Early stopping triggered at epoch {epoch+1}. Best val F1: {best_val_f1:.4f}")
+            break
+
 wandb.finish()
-print("Done.")
+print(f"Done. Best val F1: {best_val_f1:.4f}")
