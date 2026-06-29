@@ -18,7 +18,7 @@ def build_context(hits):
         meta = hit["metadata"]
         context_parts.append(
             f"[{i+1}] PMID: {meta['pmid']} ({meta['year']}) — {meta['title']}\n"
-            f"{hit['text'][:800]}"  # truncate very long abstracts
+            f"{hit['text']}"
         )
     return "\n\n".join(context_parts)
 
@@ -31,8 +31,9 @@ def generate(query, top_k=TOP_K):
         "You are a medical research assistant specializing in Alzheimer's disease. "
         "Answer the user's question using ONLY the provided research abstracts as context. "
         "Cite sources by their index number [1], [2], etc. "
+        "If a claim is not explicitly stated in the provided abstracts, do not include it. "
         "If the abstracts do not contain sufficient information to answer the question, "
-        "say so explicitly rather than speculating. "
+        "say so explicitly rather than speculating or drawing on outside knowledge. "
         "Do not use any knowledge outside the provided abstracts."
     )
 
