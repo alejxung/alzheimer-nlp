@@ -14,3 +14,5 @@ clinicalbert/checkpoints/
 clinicalbert/checkpoints_masked/
 wandb/
 rag/chroma_db/
+rag/eval_results.json
+rag/eval_summary.json
