@@ -19,3 +19,4 @@ rag/eval_summary.json
 mlops/mlflow.db
 mlops/mlruns/
 mlops/checkpoints/
+mlops/eval_result.json
