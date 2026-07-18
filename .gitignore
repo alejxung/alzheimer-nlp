@@ -16,3 +16,6 @@ wandb/
 rag/chroma_db/
 rag/eval_results.json
 rag/eval_summary.json
+mlops/mlflow.db
+mlops/mlruns/
+mlops/checkpoints/
